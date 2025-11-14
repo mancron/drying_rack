@@ -1,1 +1,12 @@
+data_visualizer - 데이터 확인
+drying_time_predictor - 모델 생성및 시간예측
+firebase_manager - firebase 연결
+
+
+
+
+
 pip install -r requirements.txt
+
+
+

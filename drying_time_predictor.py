@@ -2,10 +2,16 @@ import pandas as pd
 import numpy as np
 import xgboost as xgb
 import joblib
-import matplotlib.pyplot as plt
-import seaborn as sns
+# (★) matplotlib, seaborn 임포트 제거
 from sklearn.preprocessing import StandardScaler
 from firebase_manager import RealtimeDatabaseManager
+from heatmap_generator import create_correlation_heatmap  # (★) 새 파일에서 임포트
+
+"""
+Firebase DB에서 원본(Raw) 센서 데이터를 가져와 휴지기를 제거하고 건조 세션별로 분리
+각 세션의 데이터(현재값, 변화량)와 남은 건조 시간(정답)을 계산하여 AI 모델을 학습시키고 파일(.pkl)로 저장
+저장된 모델을 불러와, 새로 들어오는 데이터에 대한 예상 남은 시간을 실시간으로 예측(시뮬레이션)
+"""
 
 
 # (★) Realtime Database용 데이터 조회 함수
@@ -57,7 +63,7 @@ def preprocess_data_for_training(df_original, session_threshold_hours=1):
 
     # 3. 세션 ID 생성 (기존 로직 유지)
     time_diff = df['timestamp'].diff().dt.total_seconds() / 3600
-    df['session_id'] = (time_diff > session_threshold_hours).cumsum()
+    df['session_id'] = (time_diff > time_diff.mean() + time_diff.std()).cumsum()
 
     print(f"총 {df['session_id'].nunique()}개의 건조 세션을 감지했습니다.")
 
@@ -73,7 +79,8 @@ def preprocess_data_for_training(df_original, session_threshold_hours=1):
         # 4-2. (X) 실시간 피처 계산: 변화량(delta)과 추세(trend)
         session_df['Δhumidity'] = session_df['cloth_humidity'].diff().fillna(0)
         session_df['Δillumination'] = session_df['light_lux_avg'].diff().fillna(0)
-        session_df['humidity_trend'] = session_df['cloth_humidity'].rolling(3).mean().fillna(method='bfill')
+        # (★) fillna(method='bfill') -> bfill()로 수정 (경고 제거)
+        session_df['humidity_trend'] = session_df['cloth_humidity'].rolling(3).mean().bfill()
 
         all_sessions_data.append(session_df)
 
@@ -100,24 +107,6 @@ def preprocess_data_for_training(df_original, session_threshold_hours=1):
 
     print("실시간 추세 기반 데이터 전처리 완료.")
     return X, y, features
-
-
-def create_correlation_heatmap(X, y):
-    """상관관계 히트맵 생성 (기존과 동일)"""
-    if X.empty:
-        print("데이터가 없어 히트맵을 생성할 수 없습니다.")
-        return
-    print("\n--- 상관관계 히트맵 생성 시작 ---")
-    df_for_corr = X.copy()
-    df_for_corr['remaining_time_minutes'] = y
-    plt.figure(figsize=(10, 8))
-    plt.rcParams['font.family'] = 'Malgun Gothic'
-    corr = df_for_corr.corr()
-    sns.heatmap(corr, annot=True, cmap='coolwarm', fmt='.2f', linewidths=.5)
-    plt.title('건조 시간과 주요 특징 간의 상관관계 히트맵', fontsize=16, pad=12)
-    plt.savefig('correlation_heatmap.png')
-    print("상관관계 히트맵을 'correlation_heatmap.png' 파일로 저장했습니다.")
-    plt.show()
 
 
 # (★) 스케일러(StandardScaler)도 함께 저장하도록 수정
@@ -225,7 +214,8 @@ if __name__ == '__main__':
         # (★) 새 전처리 함수 사용
         X, y, trained_features = preprocess_data_for_training(all_completed_data)
 
-        create_correlation_heatmap(X, y)
+        # (★) 임포트한 함수 호출
+        #create_correlation_heatmap(X, y)  ----------------------------------히트맵-------------------------------(주석지우면 확인가능)
         create_and_save_model(X, y)
     else:
         print("RTDB에서 데이터를 가져오지 못해 학습을 진행할 수 없습니다.")
@@ -259,10 +249,13 @@ if __name__ == '__main__':
 
             elapsed_minutes = (current_data_slice['timestamp'].max() - current_data_slice[
                 'timestamp'].min()).total_seconds() / 60
+
+            # (★) 오류 수정한 부분
             latest_row = current_data_slice.iloc[-1]  # 마지막 행을 가져옴
             moist_cols = ['moisture_percent_1', 'moisture_percent_2', 'moisture_percent_3', 'moisture_percent_4']
             latest_humidity = latest_row[moist_cols].mean()  # 4개 센서의 평균 계산
             latest_timestamp = latest_row['timestamp']
+            # (★) 수정 끝
 
             print(
                 f"데이터 {i}개 수집 [{latest_timestamp.strftime('%Y-%m-%d %H:%M:%S')}] (경과 시간: {elapsed_minutes:.1f}분, 현재 습도: {latest_humidity:.1f}%)")

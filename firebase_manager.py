@@ -2,6 +2,11 @@ import pandas as pd
 import firebase_admin
 from firebase_admin import credentials, db  # 'firestore' 대신 'db'를 임포트합니다.
 
+"""
+파이어베이스 연결 파일
+"""
+
+
 
 class RealtimeDatabaseManager:
     """
