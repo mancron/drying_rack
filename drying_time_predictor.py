@@ -55,7 +55,7 @@ def preprocess_data_for_training(df_original, session_threshold_hours=1):
     # 2. 시간순 정렬
     df = df.sort_values(by='timestamp').reset_index(drop=True)
 
-    # 3. 세션 ID 생성 (기존 로직 유지 - 매우 좋음)
+    # 3. 세션 ID 생성 (기존 로직 유지)
     time_diff = df['timestamp'].diff().dt.total_seconds() / 3600
     df['session_id'] = (time_diff > session_threshold_hours).cumsum()
 

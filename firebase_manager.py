@@ -60,7 +60,7 @@ class RealtimeDatabaseManager:
             # 타임스탬프 컬럼이 있다면 datetime 객체로 변환
             if 'timestamp' in df.columns:
                 # Realtime Database는 보통 Unix time(초)을 숫자로 저장합니다.
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
                 df = df.sort_values(by='timestamp')
 
             print(f"'{path}' 경로에서 성공적으로 데이터를 가져와 DataFrame으로 변환했습니다.")
@@ -79,13 +79,13 @@ if __name__ == '__main__':
     DATABASE_URL = "https://smart-drying-rack-fe271-default-rtdb.firebaseio.com/"
 
     # 조회할 경로 (컬렉션 경로와 동일하게 사용)
-    DATA_PATH = "devices/DRYING01/readings"
+    DATA_PATH = "drying-rack-readings-1"
 
     try:
         # 1. RealtimeDatabaseManager 객체 생성 (URL 전달 필수)
         rtdb_manager = RealtimeDatabaseManager(FIREBASE_KEY_PATH, DATABASE_URL)
 
-        # 2. 데이터 조회
+        # 2. 데이터 조회 (이제 "drying-rack-readings-1" 경로에서 가져옵니다)
         sensor_df = rtdb_manager.fetch_path_as_dataframe(DATA_PATH)
 
         # 3. 결과 확인
