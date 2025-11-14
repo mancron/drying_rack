@@ -57,5 +57,4 @@ def create_correlation_heatmap(X, y):
 
 
 if __name__ == '__main__':
-    # 이 파일은 단독 실행용이 아닌, 임포트용입니다.
     print("이 스크립트는 drying_time_predictor.py에서 임포트하여 사용하는 모듈입니다.")
