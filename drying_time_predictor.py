@@ -259,8 +259,10 @@ if __name__ == '__main__':
 
             elapsed_minutes = (current_data_slice['timestamp'].max() - current_data_slice[
                 'timestamp'].min()).total_seconds() / 60
-            latest_humidity = current_data_slice.iloc[-1]['cloth_moist_pct']
-            latest_timestamp = current_data_slice.iloc[-1]['timestamp']
+            latest_row = current_data_slice.iloc[-1]  # 마지막 행을 가져옴
+            moist_cols = ['moisture_percent_1', 'moisture_percent_2', 'moisture_percent_3', 'moisture_percent_4']
+            latest_humidity = latest_row[moist_cols].mean()  # 4개 센서의 평균 계산
+            latest_timestamp = latest_row['timestamp']
 
             print(
                 f"데이터 {i}개 수집 [{latest_timestamp.strftime('%Y-%m-%d %H:%M:%S')}] (경과 시간: {elapsed_minutes:.1f}분, 현재 습도: {latest_humidity:.1f}%)")
