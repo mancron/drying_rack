@@ -20,66 +20,84 @@ def fetch_data_from_rtdb(key_path, db_url, data_path):
     try:
         rtdb_manager = RealtimeDatabaseManager(key_path, db_url)
         df = rtdb_manager.fetch_path_as_dataframe(data_path)
+        # (★) 시각화 스크립트와 동일하게 timestamp 타입 변환 보장
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df.sort_values(by='timestamp', inplace=True)
         return df
     except Exception as e:
         print(f"RTDB 데이터 조회 실패: {e}")
         return pd.DataFrame()
 
 
-# (★) "실시간 추세"를 학습하도록 완전히 수정된 전처리 함수
-def preprocess_data_for_training(df_original, session_threshold_hours=1):
+# (★) "실시간 추세" 및 "진짜 건조 완료" 로직이 적용된 전처리 함수
+def preprocess_data_for_training(df_original,
+                                 session_threshold_hours=1,
+                                 dry_threshold_percent=20.0,  # (★) 추가
+                                 dry_stable_rows=10):  # (★) 추가
     """
     (학습용) 원본 데이터를 "실시간 추세" 예측 모델용으로 가공합니다.
     - 시간 간격으로 세션을 분리합니다.
+    - (★) 낮은 습도가 지속되는 시점을 '진짜' 종료 시점으로 간주하고 데이터를 자릅니다.
     - 각 세션 내에서 '남은 건조 시간'과 '변화량' 피처를 계산합니다.
     """
     if df_original.empty:
-        return pd.DataFrame(), pd.Series()
+        return pd.DataFrame(), pd.Series(), []
 
     df = df_original.copy()
 
     # --- (★) 수정된 부분 시작 ---
 
     # 1. 실제 컬럼 이름으로 피처 계산 및 이름 표준화
-
-    # (조도) lux1만 있으므로, 이 값을 light_lux_avg로 사용
     df['light_lux_avg'] = df['lux1']
-
-    # (옷 습도) 4개 센서의 평균을 cloth_humidity로 사용
     moist_cols = ['moisture_percent_1', 'moisture_percent_2', 'moisture_percent_3', 'moisture_percent_4']
     df['cloth_humidity'] = df[moist_cols].mean(axis=1)
-
-    # (주변 온습도) 이름 변경
     df = df.rename(columns={
-        # 'ts' 대신 'timestamp'를 사용 (이미 RTDB Manager가 변환해옴)
         'temperature': 'ambient_temp',
         'humidity': 'ambient_humidity'
     })
-
     # --- (★) 수정된 부분 끝 ---
 
     # 2. 시간순 정렬
     df = df.sort_values(by='timestamp').reset_index(drop=True)
 
-    # 3. 세션 ID 생성 (기존 로직 유지)
+    # 3. 세션 ID 생성 (★ viz.py와 동일한 로직으로 수정)
     time_diff = df['timestamp'].diff().dt.total_seconds() / 3600
-    df['session_id'] = (time_diff > time_diff.mean() + time_diff.std()).cumsum()
+    df['session_id'] = (time_diff > session_threshold_hours).cumsum()
 
     print(f"총 {df['session_id'].nunique()}개의 건조 세션을 감지했습니다.")
+    print(f" (★) 건조 완료 기준: 습도 < {dry_threshold_percent}%가 {dry_stable_rows}개 포인트 연속 유지 시")
 
     # 4. 각 세션별로 "실시간 피처" 생성
     all_sessions_data = []
     for session_id in df['session_id'].unique():
         session_df = df[df['session_id'] == session_id].copy()
 
+        # (★) --- "진짜" 건조 완료 시점 탐지 (viz.py와 동일 로직) --- (★)
+        is_dry = session_df['cloth_humidity'] < dry_threshold_percent
+        is_stable_dry = is_dry.rolling(window=dry_stable_rows).sum() >= dry_stable_rows
+        stable_indices_loc = np.where(is_stable_dry)[0]  # .iloc 위치
+
+        if len(stable_indices_loc) > 0:
+            first_stable_end_iloc = stable_indices_loc[0]
+            first_stable_start_iloc = first_stable_end_iloc - dry_stable_rows + 1
+            true_end_timestamp = session_df.iloc[first_stable_start_iloc]['timestamp']
+
+            print(f"  (세션 {session_id}) '진짜' 건조 완료 시점 감지: {true_end_timestamp}")
+
+            # (★) "0인 부분(유휴 데이터)을 자름"
+            session_df = session_df[session_df['timestamp'] <= true_end_timestamp].copy()
+
+        else:
+            print(f"  (세션 {session_id}) 안정된 건조 상태를 감지하지 못함. 세션의 마지막 시간을 사용합니다.")
+        # (★) --- 로직 수정 끝 --- (★)
+
         # 4-1. (y) 타겟 변수 계산: "남은 건조 시간"
-        end_time = session_df['timestamp'].max()
+        end_time = session_df['timestamp'].max()  # (★) 이제 '진짜' 종료 시점
         session_df['remaining_time_minutes'] = (end_time - session_df['timestamp']).dt.total_seconds() / 60
 
         # 4-2. (X) 실시간 피처 계산: 변화량(delta)과 추세(trend)
         session_df['Δhumidity'] = session_df['cloth_humidity'].diff().fillna(0)
         session_df['Δillumination'] = session_df['light_lux_avg'].diff().fillna(0)
-        # (★) fillna(method='bfill') -> bfill()로 수정 (경고 제거)
         session_df['humidity_trend'] = session_df['cloth_humidity'].rolling(3).mean().bfill()
 
         all_sessions_data.append(session_df)
@@ -102,6 +120,10 @@ def preprocess_data_for_training(df_original, session_threshold_hours=1):
     # 학습에 사용할 수 있는 데이터만 필터링 (NaN 값 등 제외)
     processed_df = processed_df.dropna(subset=features + [target])
 
+    if processed_df.empty:
+        print("전처리 후 남은 데이터가 없습니다.")
+        return pd.DataFrame(), pd.Series(), []
+
     X = processed_df[features]
     y = processed_df[target]
 
@@ -110,6 +132,7 @@ def preprocess_data_for_training(df_original, session_threshold_hours=1):
 
 
 # (★) 스케일러(StandardScaler)도 함께 저장하도록 수정
+# ... (create_and_save_model 함수는 변경 없음) ...
 def create_and_save_model(X, y):
     """전체 데이터로 모델과 스케일러를 학습하고 파일로 저장합니다."""
     if X.empty or y.empty:
@@ -140,6 +163,7 @@ def create_and_save_model(X, y):
 
 
 # (★) "실시간 추세" 피처를 생성하도록 수정된 예측 함수
+# ... (make_features_for_prediction 함수는 변경 없음) ...
 def make_features_for_prediction(current_session_df, features_list):
     """(예측용) 현재 세션 데이터로 실시간 추세 피처를 생성합니다."""
     # 최소 3개 데이터가 필요 (rolling(3) 때문)
@@ -201,21 +225,33 @@ if __name__ == '__main__':
     DATABASE_URL = "https://smart-drying-rack-fe271-default-rtdb.firebaseio.com/"
     # (★) 사용자가 지정한 RTDB 경로로 변경
     DATA_PATH = "drying-rack-readings-1"
-    DRYING_COMPLETE_THRESHOLD = 5.0
+    DRYING_COMPLETE_THRESHOLD = 5.0  # (★) 시뮬레이션 종료 시점 습도
+
+    # (★) --- 새 파라미터 (viz.py와 동일) --- (★)
+    SESSION_THRESHOLD_HOURS = 1.0  # 세션 분리 기준 시간 (1시간)
+    DRY_THRESHOLD = 20.0  # 학습시 '건조 완료'로 간주할 습도 (20%)
+    DRY_STABLE_POINTS = 10  # 위 습도가 연속으로 유지되어야 하는 데이터 개수 (10개)
+    # (★) --- --- (★)
 
     # --- 1. 학습 단계 ---
     print("--- RTDB에서 전체 학습 데이터 로드 시작 ---")
     all_completed_data = fetch_data_from_rtdb(FIREBASE_KEY_PATH, DATABASE_URL, DATA_PATH)
 
     if not all_completed_data.empty:
+        # (★) fetch_data_from_rtdb가 이미 처리하지만, 안전을 위해 유지
         all_completed_data.rename(columns={'ts': 'timestamp'}, inplace=True, errors='ignore')
         all_completed_data.sort_values(by='timestamp', inplace=True)
 
-        # (★) 새 전처리 함수 사용
-        X, y, trained_features = preprocess_data_for_training(all_completed_data)
+        # (★) 새 파라미터를 사용해 전처리 함수 호출
+        X, y, trained_features = preprocess_data_for_training(
+            all_completed_data.copy(),  # 원본 유지를 위해 복사본 전달
+            session_threshold_hours=SESSION_THRESHOLD_HOURS,
+            dry_threshold_percent=DRY_THRESHOLD,
+            dry_stable_rows=DRY_STABLE_POINTS
+        )
 
         # (★) 임포트한 함수 호출
-        #create_correlation_heatmap(X, y)  ----------------------------------히트맵-------------------------------(주석지우면 확인가능)
+        # create_correlation_heatmap(X, y)  ----------------------------------히트맵-------------------------------(주석지우면 확인가능)
         create_and_save_model(X, y)
     else:
         print("RTDB에서 데이터를 가져오지 못해 학습을 진행할 수 없습니다.")
@@ -236,8 +272,24 @@ if __name__ == '__main__':
 
     # 2-2. 시뮬레이션용 데이터 준비
     if not all_completed_data.empty and all_completed_data.shape[0] > 15:
-        new_session_data = all_completed_data.tail(15).copy().reset_index(drop=True)
+        # (★) 시뮬레이션용 데이터는 학습 데이터와 분리하기 위해 마지막 세션을 가져오도록 수정
+        last_session_id = all_completed_data['session_id'].max()
+        sim_data_pool = all_completed_data[all_completed_data['session_id'] == last_session_id]
 
+        # (★) 시뮬레이션용 데이터가 충분한지 확인
+        if sim_data_pool.shape[0] > 15:
+            new_session_data = sim_data_pool.tail(15).copy().reset_index(drop=True)
+            print(f"시뮬레이션용 데이터 {len(new_session_data)}개 준비 완료 (마지막 세션 {last_session_id}의 끝 15개 데이터)")
+        else:
+            print("시뮬레이션을 위한 데이터가 부족합니다. (마지막 세션 데이터 15개 미만)")
+            new_session_data = pd.DataFrame()  # 빈 프레임으로 설정
+
+    else:
+        print("시뮬레이션을 위한 데이터가 부족합니다.")
+        new_session_data = pd.DataFrame()  # 빈 프레임으로 설정
+
+    # (★) new_session_data가 비어있지 않을 때만 시뮬레이션 실행
+    if not new_session_data.empty:
         actual_time_sec = (new_session_data['timestamp'].max() - new_session_data['timestamp'].min()).total_seconds()
         print(f"\n새로운 건조 시작! (시뮬레이션용 데이터 {len(new_session_data)}개)")
         print(f"이 세션의 실제 총 건조 시간: {actual_time_sec / 60:.0f} 분")
@@ -279,4 +331,4 @@ if __name__ == '__main__':
 
                 print(f"==> 예상 남은 시간: {predicted_remaining_time:.2f} 분")
     else:
-        print("시뮬레이션을 위한 데이터가 부족합니다.")
+        print("시뮬레이션을 실행하지 않았습니다.")

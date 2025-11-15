@@ -84,7 +84,7 @@ if __name__ == '__main__':
     DATABASE_URL = "https://smart-drying-rack-fe271-default-rtdb.firebaseio.com/"
 
     # 조회할 경로 (컬렉션 경로와 동일하게 사용)
-    DATA_PATH = "drying-rack-readings-1"
+    DATA_PATH = "drying-rack-reading-1"
 
     try:
         # 1. RealtimeDatabaseManager 객체 생성 (URL 전달 필수)
