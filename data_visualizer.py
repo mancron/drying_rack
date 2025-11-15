@@ -238,7 +238,7 @@ def plot_raw_data(df, session_id=None):  # (★) session_id 인자 추가
 
     # (★) 5행 1열: 4개 습도 센서를 한 그래프에 그리기 위해
     fig, axes = plt.subplots(5, 1, figsize=(14, 12), sharex=True, num=fig_num)  # num=fig_num
-    fig.suptitle(fig_title, fontsize=20, y=1.02)
+    fig.suptitle(fig_title, fontsize=20, y=0.98)  # (★) y=1.02에서 0.98로 내려서 보이도록 수정
 
     # 1. 온도
     axes[0].plot(df['timestamp'], df['temperature'], color='red', marker='.', linestyle='-', markersize=2)
@@ -300,7 +300,7 @@ def plot_processed_data(df, session_id=None):  # (★) session_id 인자 추가
     fig_title = f'{fig_num}: AI 학습용 피처(Feature) 변화'
 
     fig, axes = plt.subplots(5, 1, figsize=(14, 12), sharex=True, num=fig_num)  # num=fig_num
-    fig.suptitle(fig_title, fontsize=20, y=1.02)
+    fig.suptitle(fig_title, fontsize=20, y=0.98)  # (★) y=1.02에서 0.98로 내려서 보이도록 수정
 
     # 1. (타겟 y) 남은 건조 시간
     axes[0].plot(df['timestamp'], df['remaining_time_minutes'], color='purple', marker='.', linestyle='-', markersize=2)
