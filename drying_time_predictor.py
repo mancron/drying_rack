@@ -32,7 +32,7 @@ def fetch_data_from_rtdb(key_path, db_url, data_path):
 # (★) "실시간 추세" 및 "진짜 건조 완료" 로직이 적용된 전처리 함수
 def preprocess_data_for_training(df_original,
                                  session_threshold_hours=1,
-                                 dry_threshold_percent=20.0,  # (★) 추가
+                                 dry_threshold_percent=1.0,  # (★) 추가
                                  dry_stable_rows=10):  # (★) 추가
     """
     (학습용) 원본 데이터를 "실시간 추세" 예측 모델용으로 가공합니다.
