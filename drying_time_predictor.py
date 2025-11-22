@@ -14,18 +14,26 @@ Firebase DB에서 원본(Raw) 센서 데이터를 가져와 휴지기를 제거�
 """
 
 
-# (★) Realtime Database용 데이터 조회 함수
-def fetch_data_from_rtdb(key_path, db_url, data_path):
-    """Realtime Database에서 데이터를 가져와 DataFrame으로 변환합니다."""
+# (★) Realtime Database용 데이터 조회 함수 (순차 조회 로직)
+def fetch_all_data_from_rtdb(key_path, db_url, base_data_path):
+    """
+    Realtime Database에서 base_data_path-1, -2, ... 경로의 데이터를 순차적으로 가져와
+    하나의 DataFrame으로 병합하고 정렬합니다.
+    """
     try:
+        # 1. RealtimeDatabaseManager 객체 생성 (URL 전달 필수)
         rtdb_manager = RealtimeDatabaseManager(key_path, db_url)
-        df = rtdb_manager.fetch_path_as_dataframe(data_path)
-        # (★) 시각화 스크립트와 동일하게 timestamp 타입 변환 보장
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        # 2. (firebase_manager.py에 추가된 함수) 순차적 데이터 조회
+        df = rtdb_manager.fetch_sequential_paths_as_dataframe(base_data_path)
+
+        if df.empty:
+            return pd.DataFrame()
+
+        # 시간순 정렬 보장
         df.sort_values(by='timestamp', inplace=True)
         return df
     except Exception as e:
-        print(f"RTDB 데이터 조회 실패: {e}")
+        print(f"RTDB 전체 데이터 조회 실패: {e}")
         return pd.DataFrame()
 
 
@@ -132,11 +140,10 @@ def preprocess_data_for_training(df_original,
 
 
 # (★) 스케일러(StandardScaler)도 함께 저장하도록 수정
-# ... (create_and_save_model 함수는 변경 없음) ...
 def create_and_save_model(X, y):
     """전체 데이터로 모델과 스케일러를 학습하고 파일로 저장합니다."""
     if X.empty or y.empty:
-        print("학습할 데이터가 없어 모델 생성을 건너뜁니다.")
+        print("학습할 데이터가 없어 모델 생성을 건너킵니다.")
         return None
 
     print("\n--- 모델 및 스케일러 학습 시작 ---")
@@ -163,7 +170,6 @@ def create_and_save_model(X, y):
 
 
 # (★) "실시간 추세" 피처를 생성하도록 수정된 예측 함수
-# ... (make_features_for_prediction 함수는 변경 없음) ...
 def make_features_for_prediction(current_session_df, features_list):
     """(예측용) 현재 세션 데이터로 실시간 추세 피처를 생성합니다."""
     # 최소 3개 데이터가 필요 (rolling(3) 때문)
@@ -175,20 +181,13 @@ def make_features_for_prediction(current_session_df, features_list):
     # --- (★) 수정된 부분 시작 ---
 
     # 1. 실제 컬럼 이름으로 피처 계산 및 이름 표준화
-
-    # (조도) lux1만 있으므로, 이 값을 light_lux_avg로 사용
     df['light_lux_avg'] = df['lux1']
-
-    # (옷 습도) 4개 센서의 평균을 cloth_humidity로 사용
     moist_cols = ['moisture_percent_1', 'moisture_percent_2', 'moisture_percent_3', 'moisture_percent_4']
     df['cloth_humidity'] = df[moist_cols].mean(axis=1)
-
-    # (주변 온습도) 이름 변경
     df = df.rename(columns={
         'temperature': 'ambient_temp',
         'humidity': 'ambient_humidity'
     })
-
     # --- (★) 수정된 부분 끝 ---
 
     # 2. 가장 마지막 3개 데이터 추출
@@ -223,9 +222,9 @@ if __name__ == '__main__':
     FIREBASE_KEY_PATH = "firebase.json"
     # (★) Realtime Database URL로 변경
     DATABASE_URL = "https://smart-drying-rack-fe271-default-rtdb.firebaseio.com/"
-    # (★) 사용자가 지정한 RTDB 경로로 변경
-    DATA_PATH = "drying-rack-readings-1"
-    DRYING_COMPLETE_THRESHOLD = 5.0  # (★) 시뮬레이션 종료 시점 습도
+    # (★) 사용자가 지정한 RTDB 경로의 기본 이름으로 변경
+    BASE_DATA_PATH = "drying-rack-reading"
+    DRYING_COMPLETE_THRESHOLD = 1.0  # (★) 시뮬레이션 종료 시점 습도
 
     # (★) --- 새 파라미터 (viz.py와 동일) --- (★)
     SESSION_THRESHOLD_HOURS = 1.0  # 세션 분리 기준 시간 (1시간)
@@ -235,12 +234,12 @@ if __name__ == '__main__':
 
     # --- 1. 학습 단계 ---
     print("--- RTDB에서 전체 학습 데이터 로드 시작 ---")
-    all_completed_data = fetch_data_from_rtdb(FIREBASE_KEY_PATH, DATABASE_URL, DATA_PATH)
+    # (★) 순차 조회 함수 호출로 변경
+    all_completed_data = fetch_all_data_from_rtdb(FIREBASE_KEY_PATH, DATABASE_URL, BASE_DATA_PATH)
 
     if not all_completed_data.empty:
-        # (★) fetch_data_from_rtdb가 이미 처리하지만, 안전을 위해 유지
+        # (★) fetch_all_data_from_rtdb가 이미 정렬을 처리하므로 중복 코드는 삭제
         all_completed_data.rename(columns={'ts': 'timestamp'}, inplace=True, errors='ignore')
-        all_completed_data.sort_values(by='timestamp', inplace=True)
 
         # (★) 새 파라미터를 사용해 전처리 함수 호출
         X, y, trained_features = preprocess_data_for_training(
@@ -250,8 +249,7 @@ if __name__ == '__main__':
             dry_stable_rows=DRY_STABLE_POINTS
         )
 
-        # (★) 임포트한 함수 호출
-        # create_correlation_heatmap(X, y)  ----------------------------------히트맵-------------------------------(주석지우면 확인가능)
+        create_correlation_heatmap(X, y)
         create_and_save_model(X, y)
     else:
         print("RTDB에서 데이터를 가져오지 못해 학습을 진행할 수 없습니다.")
@@ -272,7 +270,10 @@ if __name__ == '__main__':
 
     # 2-2. 시뮬레이션용 데이터 준비
     if not all_completed_data.empty and all_completed_data.shape[0] > 15:
-        # (★) 시뮬레이션용 데이터는 학습 데이터와 분리하기 위해 마지막 세션을 가져오도록 수정
+        # 세션 ID를 다시 계산 (순차 조회 후 합쳐진 데이터이므로 세션 ID가 필요함)
+        time_diff_sim = all_completed_data['timestamp'].diff().dt.total_seconds() / 3600
+        all_completed_data['session_id'] = (time_diff_sim > SESSION_THRESHOLD_HOURS).cumsum()
+
         last_session_id = all_completed_data['session_id'].max()
         sim_data_pool = all_completed_data[all_completed_data['session_id'] == last_session_id]
 
@@ -290,9 +291,7 @@ if __name__ == '__main__':
 
     # (★) new_session_data가 비어있지 않을 때만 시뮬레이션 실행
     if not new_session_data.empty:
-        actual_time_sec = (new_session_data['timestamp'].max() - new_session_data['timestamp'].min()).total_seconds()
         print(f"\n새로운 건조 시작! (시뮬레이션용 데이터 {len(new_session_data)}개)")
-        print(f"이 세션의 실제 총 건조 시간: {actual_time_sec / 60:.0f} 분")
         print("-" * 30)
 
         # (★) 예측 시뮬레이션 (최소 3개 데이터부터 시작)
@@ -302,12 +301,10 @@ if __name__ == '__main__':
             elapsed_minutes = (current_data_slice['timestamp'].max() - current_data_slice[
                 'timestamp'].min()).total_seconds() / 60
 
-            # (★) 오류 수정한 부분
             latest_row = current_data_slice.iloc[-1]  # 마지막 행을 가져옴
             moist_cols = ['moisture_percent_1', 'moisture_percent_2', 'moisture_percent_3', 'moisture_percent_4']
             latest_humidity = latest_row[moist_cols].mean()  # 4개 센서의 평균 계산
             latest_timestamp = latest_row['timestamp']
-            # (★) 수정 끝
 
             print(
                 f"데이터 {i}개 수집 [{latest_timestamp.strftime('%Y-%m-%d %H:%M:%S')}] (경과 시간: {elapsed_minutes:.1f}분, 현재 습도: {latest_humidity:.1f}%)")
