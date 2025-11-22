@@ -1,18 +1,16 @@
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import platform
 import seaborn as sns
 from typing import List
-# (★) Slider와 TextBox 위젯은 Matplotlib 기본 기능이므로 안전합니다.
-from matplotlib.widgets import Slider, TextBox, Button
-
+from matplotlib.widgets import TextBox, RadioButtons
+import matplotlib.pyplot as plt
 """
-데이터 원본 전처리 및 세션별 시각화 파일
-- Firebase RTDB에서 데이터를 로드합니다.
-- 데이터를 건조 세션별로 분리합니다.
-- (★) 슬라이더와 검색창을 통해 원하는 세션으로 빠르게 이동합니다.
+데이터 시각화
+
+좌우 방향키 or 원하는 페이지 오른쪽위에 입력
+왼쪽위에 라디오 버튼으로 원본/전처리 데이터 확인가능
 """
 
 # 1. RealtimeDatabaseManager 로드
@@ -182,7 +180,8 @@ def plot_processed_data(axes: List[plt.Axes], df, session_id):
     axes[4].xaxis.set_major_formatter(xfmt)
 
 
-# 5. (★) 슬라이더 및 검색 네비게이터
+
+
 class SessionNavigator:
     def __init__(self, raw_data_dict, processed_data_dict, valid_sessions):
         self.raw_data_dict = raw_data_dict
@@ -190,53 +189,56 @@ class SessionNavigator:
         self.sessions = valid_sessions
         self.current_index = 0
         self.num_sessions = len(valid_sessions)
+        self.view_mode = 'Raw Data'  # 기본 보기 모드
 
         if self.num_sessions == 0:
             print("시각화할 세션이 없습니다.")
             return
 
-        # 1. Figure 생성 (공간 확보를 위해 top/bottom 여백 조정)
-        self.fig, self.axes = plt.subplots(10, 1, figsize=(16, 20), num='건조 세션 시각화')
-        plt.subplots_adjust(top=0.90, bottom=0.05, hspace=0.6)  # 위쪽 여백(top)을 슬라이더용으로 확보
+        # 1. Figure 생성
+        # 슬라이더가 없어졌으므로 상단 여백(top)을 조금 줄여도 됩니다.
+        self.fig, self.axes = plt.subplots(5, 1, figsize=(16, 12), num='건조 세션 시각화')
+        plt.subplots_adjust(top=0.90, bottom=0.05, hspace=0.4, left=0.1, right=0.9)
 
-        # 2. (★) 슬라이더 위젯 추가 (상단에 배치)
-        ax_slider = plt.axes([0.25, 0.96, 0.5, 0.02])  # [left, bottom, width, height]
-        self.slider = Slider(
-            ax=ax_slider,
-            label="세션 번호 드래그: ",
-            valmin=0,
-            valmax=self.num_sessions - 1,
-            valinit=0,
-            valstep=1,
-            valfmt='%0.0f'
-        )
-        self.slider.on_changed(self.update_slider)
+        # 2. (슬라이더 제거됨)
 
-        # 3. (★) 텍스트 입력 위젯 추가 (상단 우측에 배치)
-        ax_box = plt.axes([0.85, 0.96, 0.1, 0.02])
-        self.text_box = TextBox(ax_box, 'ID 검색: ', initial=str(self.sessions[0]))
+        # 3. 텍스트 검색 위젯 (상단 중앙~우측 배치)
+        # 슬라이더 자리가 비었으니 검색창을 좀 더 잘 보이는 곳(중앙 우측)으로 옮깁니다.
+        # [left, bottom, width, height]
+        ax_box = plt.axes([0.65, 0.94, 0.15, 0.03])
+        self.text_box = TextBox(ax_box, 'Session ID 이동: ', initial=str(self.sessions[0]))
         self.text_box.on_submit(self.submit_text)
 
-        # 4. 키보드 연결
+        # 4. 보기 모드 라디오 버튼 (상단 좌측)
+        ax_radio = plt.axes([0.05, 0.92, 0.12, 0.06], facecolor='#f0f0f0')
+        self.radio = RadioButtons(ax_radio, ('Raw Data', 'Processed Data'))
+        self.radio.on_clicked(self.change_view_mode)
+
+        # 5. 키보드 연결
         self.fig.canvas.mpl_connect('key_press_event', self.on_key_press)
 
         self.update_view()
+
+        # (★) 키보드 포커스 자동 설정 (Tkinter 등 환경 호환)
+        try:
+            self.fig.canvas.get_tk_widget().focus_set()
+        except AttributeError:
+            pass
+
         plt.show()
 
-    def update_slider(self, val):
-        """슬라이더 이동 시 호출"""
-        idx = int(self.slider.val)
-        if idx != self.current_index:
-            self.current_index = idx
-            self.update_view()
+    def change_view_mode(self, label):
+        """라디오 버튼 클릭 시 호출"""
+        self.view_mode = label
+        self.update_view()
 
     def submit_text(self, text):
-        """텍스트 입력 시 호출"""
+        """텍스트 박스 입력 엔터 시 호출"""
         try:
             target_id = int(text)
             if target_id in self.sessions:
                 self.current_index = self.sessions.index(target_id)
-                self.slider.set_val(self.current_index)  # 슬라이더도 동기화
+                self.update_view()  # 슬라이더 업데이트 부분 삭제됨
             else:
                 print(f"세션 ID {target_id}를 찾을 수 없습니다.")
         except ValueError:
@@ -244,44 +246,54 @@ class SessionNavigator:
 
     def update_view(self):
         session_id = self.sessions[self.current_index]
-        raw_df = self.raw_data_dict[session_id]
-        processed_df = self.processed_data_dict[session_id]
 
+        # 화면 초기화
         for ax in self.axes:
             ax.clear()
 
         # 제목 업데이트
         self.fig.suptitle(
-            f'[{self.current_index + 1}/{self.num_sessions}] 세션 {session_id} 시각화\n',
-            fontsize=20, y=0.95
+            f'[{self.current_index + 1}/{self.num_sessions}] 세션 {session_id} - {self.view_mode}',
+            fontsize=18, y=0.98
         )
 
-        # 그래프 그리기
-        raw_axes = self.axes[:5]
-        proc_axes = self.axes[5:]
+        # 모드에 따라 그래프 그리기
+        if self.view_mode == 'Raw Data':
+            raw_df = self.raw_data_dict[session_id]
+            plot_raw_data(self.axes, raw_df, session_id)
+            self.axes[0].text(0.0, 1.05, '■ 원본 센서 데이터', transform=self.axes[0].transAxes,
+                              fontsize=12, weight='bold', color='blue')
+        else:
+            processed_df = self.processed_data_dict[session_id]
+            plot_processed_data(self.axes, processed_df, session_id)
+            self.axes[0].text(0.0, 1.05, '■ 학습용 데이터 (Processed)', transform=self.axes[0].transAxes,
+                              fontsize=12, weight='bold', color='green')
 
-        plot_raw_data(raw_axes, raw_df, session_id)
-        plot_processed_data(proc_axes, processed_df, session_id)
-
-        # 라벨 정리
-        raw_axes[0].text(0.0, 1.1, '[Raw Data]', transform=raw_axes[0].transAxes, fontsize=14, weight='bold',
-                         color='blue')
-        proc_axes[0].text(0.0, 1.1, '[Processed Data]', transform=proc_axes[0].transAxes, fontsize=14, weight='bold',
-                          color='green')
-
-        for ax in raw_axes[:-1]: ax.set_xticklabels([])
-        for ax in proc_axes[:-1]: ax.set_xticklabels([])
+        # X축 라벨 정리
+        for ax in self.axes[:-1]:
+            ax.set_xticklabels([])
 
         self.fig.canvas.draw_idle()
 
     def on_key_press(self, event):
-        if event.key in ['right', 'n']:
-            self.current_index = (self.current_index + 1) % self.num_sessions
-            self.slider.set_val(self.current_index)  # 슬라이더 동기화
-        elif event.key in ['left', 'p']:
-            self.current_index = (self.current_index - 1 + self.num_sessions) % self.num_sessions
-            self.slider.set_val(self.current_index)  # 슬라이더 동기화
+        """키보드 조작 로직"""
+        if event.key is None:
+            return
 
+        # 텍스트 박스 입력 중일 때는 그래프 이동 막기
+        if event.inaxes == self.text_box.ax:
+            return
+
+        # 방향키 로직 (슬라이더 업데이트 코드 삭제됨)
+        if event.key in ['right', 'n', 'down']:
+            self.current_index = (self.current_index + 1) % self.num_sessions
+            self.text_box.set_val(str(self.sessions[self.current_index]))  # 텍스트박스 숫자도 업데이트
+            self.update_view()
+
+        elif event.key in ['left', 'p', 'up']:
+            self.current_index = (self.current_index - 1 + self.num_sessions) % self.num_sessions
+            self.text_box.set_val(str(self.sessions[self.current_index]))  # 텍스트박스 숫자도 업데이트
+            self.update_view()
 
 # --- 메인 실행 ---
 if __name__ == '__main__':
