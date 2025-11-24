@@ -228,7 +228,7 @@ if __name__ == '__main__':
 
     # (★) --- 새 파라미터 (viz.py와 동일) --- (★)
     SESSION_THRESHOLD_HOURS = 1.0  # 세션 분리 기준 시간 (1시간)
-    DRY_THRESHOLD = 20.0  # 학습시 '건조 완료'로 간주할 습도 (20%)
+    DRY_THRESHOLD = 1.0  # 학습시 '건조 완료'로 간주할 습도 (1%)
     DRY_STABLE_POINTS = 10  # 위 습도가 연속으로 유지되어야 하는 데이터 개수 (10개)
     # (★) --- --- (★)
 
