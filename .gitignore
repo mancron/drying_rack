@@ -2,4 +2,5 @@ firebase.json
 drying_model.pkl
 .idea
 .venv
-.png
+.
+scaler.pkl

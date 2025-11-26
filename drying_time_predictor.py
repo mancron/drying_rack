@@ -38,6 +38,7 @@ def fetch_all_data_from_rtdb(key_path, db_url, base_data_path):
 
 
 # (★) "실시간 추세" 및 "진짜 건조 완료" 로직이 적용된 전처리 함수
+# (★) "실시간 추세" 및 "진짜 건조 완료" 로직이 적용된 전처리 함수
 def preprocess_data_for_training(df_original,
                                  session_threshold_hours=1,
                                  dry_threshold_percent=1.0,  # (★) 추가
@@ -46,14 +47,13 @@ def preprocess_data_for_training(df_original,
     (학습용) 원본 데이터를 "실시간 추세" 예측 모델용으로 가공합니다.
     - 시간 간격으로 세션을 분리합니다.
     - (★) 낮은 습도가 지속되는 시점을 '진짜' 종료 시점으로 간주하고 데이터를 자릅니다.
+    - (★수정) 건조가 완료되지 않은(중단된) 세션은 학습에서 제외합니다.
     - 각 세션 내에서 '남은 건조 시간'과 '변화량' 피처를 계산합니다.
     """
     if df_original.empty:
         return pd.DataFrame(), pd.Series(), []
 
     df = df_original.copy()
-
-    # --- (★) 수정된 부분 시작 ---
 
     # 1. 실제 컬럼 이름으로 피처 계산 및 이름 표준화
     df['light_lux_avg'] = df['lux1']
@@ -63,12 +63,11 @@ def preprocess_data_for_training(df_original,
         'temperature': 'ambient_temp',
         'humidity': 'ambient_humidity'
     })
-    # --- (★) 수정된 부분 끝 ---
 
     # 2. 시간순 정렬
     df = df.sort_values(by='timestamp').reset_index(drop=True)
 
-    # 3. 세션 ID 생성 (★ viz.py와 동일한 로직으로 수정)
+    # 3. 세션 ID 생성
     time_diff = df['timestamp'].diff().dt.total_seconds() / 3600
     df['session_id'] = (time_diff > session_threshold_hours).cumsum()
 
@@ -80,7 +79,7 @@ def preprocess_data_for_training(df_original,
     for session_id in df['session_id'].unique():
         session_df = df[df['session_id'] == session_id].copy()
 
-        # (★) --- "진짜" 건조 완료 시점 탐지 (viz.py와 동일 로직) --- (★)
+        # (★) --- "진짜" 건조 완료 시점 탐지 ---
         is_dry = session_df['cloth_humidity'] < dry_threshold_percent
         is_stable_dry = is_dry.rolling(window=dry_stable_rows).sum() >= dry_stable_rows
         stable_indices_loc = np.where(is_stable_dry)[0]  # .iloc 위치
@@ -92,15 +91,16 @@ def preprocess_data_for_training(df_original,
 
             print(f"  (세션 {session_id}) '진짜' 건조 완료 시점 감지: {true_end_timestamp}")
 
-            # (★) "0인 부분(유휴 데이터)을 자름"
+            # "완료 이후의 데이터(유휴 데이터)를 자름"
             session_df = session_df[session_df['timestamp'] <= true_end_timestamp].copy()
 
         else:
-            print(f"  (세션 {session_id}) 안정된 건조 상태를 감지하지 못함. 세션의 마지막 시간을 사용합니다.")
-        # (★) --- 로직 수정 끝 --- (★)
+            # (★ 중요 수정) 건조 완료 조건에 도달하지 못한 세션은 학습에서 제외
+            print(f"  (세션 {session_id}) 안정된 건조 상태를 감지하지 못함. >> 학습 데이터에서 제외합니다. <<")
+            continue  # 이 세션은 all_sessions_data에 추가하지 않고 건너뜀
 
         # 4-1. (y) 타겟 변수 계산: "남은 건조 시간"
-        end_time = session_df['timestamp'].max()  # (★) 이제 '진짜' 종료 시점
+        end_time = session_df['timestamp'].max()
         session_df['remaining_time_minutes'] = (end_time - session_df['timestamp']).dt.total_seconds() / 60
 
         # 4-2. (X) 실시간 피처 계산: 변화량(delta)과 추세(trend)
@@ -109,6 +109,11 @@ def preprocess_data_for_training(df_original,
         session_df['humidity_trend'] = session_df['cloth_humidity'].rolling(3).mean().bfill()
 
         all_sessions_data.append(session_df)
+
+    # (예외 처리) 유효한 세션이 하나도 없을 경우
+    if not all_sessions_data:
+        print("경고: 건조 완료 기준을 만족하는 세션이 하나도 없습니다. 임계값(DRY_THRESHOLD)을 확인하세요.")
+        return pd.DataFrame(), pd.Series(), []
 
     # 5. 모든 세션 데이터를 다시 하나로 합침
     processed_df = pd.concat(all_sessions_data, ignore_index=True)
@@ -137,7 +142,6 @@ def preprocess_data_for_training(df_original,
 
     print("실시간 추세 기반 데이터 전처리 완료.")
     return X, y, features
-
 
 # (★) 스케일러(StandardScaler)도 함께 저장하도록 수정
 def create_and_save_model(X, y):
@@ -211,7 +215,7 @@ def make_features_for_prediction(current_session_df, features_list):
     }])
 
     # 학습 시 사용한 피처 목록(features_list) 순서대로 정렬
-    features = temp_df[features_list].values
+    features = temp_df[features_list]
 
     return features
 
@@ -249,7 +253,7 @@ if __name__ == '__main__':
             dry_stable_rows=DRY_STABLE_POINTS
         )
 
-        create_correlation_heatmap(X, y)
+       # create_correlation_heatmap(X, y)
         create_and_save_model(X, y)
     else:
         print("RTDB에서 데이터를 가져오지 못해 학습을 진행할 수 없습니다.")
@@ -320,12 +324,20 @@ if __name__ == '__main__':
 
             if prediction_features is not None:
                 # (★) 예측 전 스케일링 필수!
-                scaled_features = loaded_scaler.transform(prediction_features)
+                scaled_features = loaded_scaler.transform(prediction_features)  #
 
                 # (★) 모델이 '남은 시간'을 바로 예측함
-                predicted_remaining_time = loaded_model.predict(scaled_features)[0]
-                predicted_remaining_time = max(0, predicted_remaining_time)  # 0분 이하 방지
+                predicted_remaining_time = loaded_model.predict(scaled_features)[0]  #
+                predicted_remaining_time = max(0, predicted_remaining_time)  # 0분 이하 방지 #
 
-                print(f"==> 예상 남은 시간: {predicted_remaining_time:.2f} 분")
+                # === [수정 부분 시작] ===
+                # 분(minute)을 시간(hour)과 분(minute)으로 변환
+                pred_hours = int(predicted_remaining_time // 60)
+                pred_minutes = int(predicted_remaining_time % 60)
+
+                if pred_hours > 0:
+                    print(f"==> 예상 남은 시간: {pred_hours}시간 {pred_minutes}분 ({predicted_remaining_time:.1f}분)")
+                else:
+                    print(f"==> 예상 남은 시간: {pred_minutes}분")
     else:
         print("시뮬레이션을 실행하지 않았습니다.")
