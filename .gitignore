@@ -4,3 +4,4 @@ drying_model.pkl
 .venv
 .
 scaler.pkl
+correlation_heatmap.png

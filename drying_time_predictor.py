@@ -329,7 +329,7 @@ if __name__ == '__main__':
         exit()
 
     # 2-2. 시뮬레이션용 데이터 준비
-    if not all_completed_data.empty and all_completed_data.shape[0] > 15:
+    if not all_completed_data.empty and all_completed_data.shape[0] > 10:
         # 세션 ID를 다시 계산 (순차 조회 후 합쳐진 데이터이므로 세션 ID가 필요함)
         time_diff_sim = all_completed_data['timestamp'].diff().dt.total_seconds() / 3600
         all_completed_data['session_id'] = (time_diff_sim > SESSION_THRESHOLD_HOURS).cumsum()
@@ -338,11 +338,11 @@ if __name__ == '__main__':
         sim_data_pool = all_completed_data[all_completed_data['session_id'] == last_session_id]
 
         # (★) 시뮬레이션용 데이터가 충분한지 확인
-        if sim_data_pool.shape[0] > 15:
-            new_session_data = sim_data_pool.tail(15).copy().reset_index(drop=True)
-            print(f"시뮬레이션용 데이터 {len(new_session_data)}개 준비 완료 (마지막 세션 {last_session_id}의 끝 15개 데이터)")
+        if sim_data_pool.shape[0] > 10:
+            new_session_data = sim_data_pool.tail(10).copy().reset_index(drop=True)
+            print(f"시뮬레이션용 데이터 {len(new_session_data)}개 준비 완료 (마지막 세션 {last_session_id}의 끝 10개 데이터)")
         else:
-            print("시뮬레이션을 위한 데이터가 부족합니다. (마지막 세션 데이터 15개 미만)")
+            print("시뮬레이션을 위한 데이터가 부족합니다. (마지막 세션 데이터 10개 미만)")
             new_session_data = pd.DataFrame()  # 빈 프레임으로 설정
 
     else:
@@ -354,46 +354,48 @@ if __name__ == '__main__':
         print(f"\n새로운 건조 시작! (시뮬레이션용 데이터 {len(new_session_data)}개)")
         print("-" * 30)
 
-        # (★) 예측 시뮬레이션 (최소 3개 데이터부터 시작)
+        # 마지막 값을 저장할 변수 초기화
+        final_pred_min = 0
+        final_elapsed_min = 0
+
         for i in range(3, len(new_session_data) + 1):
             current_data_slice = new_session_data.head(i)
 
+            # 경과 시간 계산
             elapsed_minutes = (current_data_slice['timestamp'].max() - current_data_slice[
                 'timestamp'].min()).total_seconds() / 60
+            final_elapsed_min = elapsed_minutes  # (★) ET 저장을 위해 갱신
 
-            latest_row = current_data_slice.iloc[-1]  # 마지막 행을 가져옴
+            latest_row = current_data_slice.iloc[-1]
             moist_cols = ['moisture_percent_1', 'moisture_percent_2', 'moisture_percent_3', 'moisture_percent_4']
-            latest_humidity = latest_row[moist_cols].mean()  # 4개 센서의 평균 계산
+            latest_humidity = latest_row[moist_cols].mean()
             latest_timestamp = latest_row['timestamp']
 
+            # (기존 출력 유지)
             print(
                 f"데이터 {i}개 수집 [{latest_timestamp.strftime('%Y-%m-%d %H:%M:%S')}] (경과 시간: {elapsed_minutes:.1f}분, 현재 습도: {latest_humidity:.1f}%)")
 
             # 기능 1: 건조 완료 판단
             if latest_humidity < DRYING_COMPLETE_THRESHOLD:
                 print("==> 건조 완료 기준 도달! 건조를 종료합니다.")
+                final_pred_min = 0  # 완료되었으므로 남은 시간 0
                 break
 
             # 기능 2: 남은 시간 예측
-            # (★) 새 피처 생성 함수 사용
             prediction_features = make_features_for_prediction(current_data_slice, trained_features)
 
             if prediction_features is not None:
-                # (★) 예측 전 스케일링 필수!
-                scaled_features = loaded_scaler.transform(prediction_features)  #
+                scaled_features = loaded_scaler.transform(prediction_features)
+                predicted_remaining_time = loaded_model.predict(scaled_features)[0]
+                predicted_remaining_time = max(0, predicted_remaining_time)
 
-                # (★) 모델이 '남은 시간'을 바로 예측함
-                predicted_remaining_time = loaded_model.predict(scaled_features)[0]  #
-                predicted_remaining_time = max(0, predicted_remaining_time)  # 0분 이하 방지 #
+                final_pred_min = predicted_remaining_time  # (★) RT 저장을 위해 갱신
 
-                # === [수정 부분 시작] ===
-                # 분(minute)을 시간(hour)과 분(minute)으로 변환
-                pred_hours = int(predicted_remaining_time // 60)
-                pred_minutes = int(predicted_remaining_time % 60)
+                # (기존 중간 과정 출력 유지 - 필요 없으면 주석 처리 하세요)
+                print(f"==> 예상 남은 시간: {int(predicted_remaining_time)}분")
 
-                if pred_hours > 0:
-                    print(f"==> 예상 남은 시간: {pred_hours}시간 {pred_minutes}분 ({predicted_remaining_time:.1f}분)")
-                else:
-                    print(f"==> 예상 남은 시간: {pred_minutes}분")
+        # (★) 요청하신 포맷으로 마지막에 한 줄 출력
+        print(f"예측시간:{int(final_pred_min)}(min)  경과시간:{int(final_elapsed_min)}(min)")
+
     else:
         print("시뮬레이션을 실행하지 않았습니다.")
