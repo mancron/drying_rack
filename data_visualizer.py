@@ -40,7 +40,7 @@ def fetch_all_data_from_rtdb(key_path, db_url, base_data_path):
 # 2. 전처리 함수
 def preprocess_data_for_visualization(df_original,
                                       session_threshold_hours=1,
-                                      dry_threshold_percent=20.0,
+                                      dry_threshold_percent=1.0,
                                       dry_stable_rows=10):
     if df_original.empty:
         return pd.DataFrame()
@@ -300,7 +300,7 @@ if __name__ == '__main__':
     set_korean_font()
     FIREBASE_KEY_PATH = "firebase.json"
     DATABASE_URL = "https://smart-drying-rack-fe271-default-rtdb.firebaseio.com/"
-    BASE_DATA_PATH = "drying-rack-reading"
+    BASE_DATA_PATH = "drying-rack"
 
     df_original = fetch_all_data_from_rtdb(FIREBASE_KEY_PATH, DATABASE_URL, BASE_DATA_PATH)
 

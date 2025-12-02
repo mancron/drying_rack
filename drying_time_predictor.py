@@ -6,6 +6,9 @@ import joblib
 from sklearn.preprocessing import StandardScaler
 from firebase_manager import RealtimeDatabaseManager
 from heatmap_generator import create_correlation_heatmap  # (★) 새 파일에서 임포트
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error, r2_score, mean_squared_error
+import matplotlib.pyplot as plt
 
 """
 Firebase DB에서 원본(Raw) 센서 데이터를 가져와 휴지기를 제거하고 건조 세션별로 분리
@@ -143,34 +146,87 @@ def preprocess_data_for_training(df_original,
     print("실시간 추세 기반 데이터 전처리 완료.")
     return X, y, features
 
+'''
+def plot_prediction_results(y_true, y_pred):
+    plt.figure(figsize=(10, 6))
+
+    # 산점도 그리기
+    plt.scatter(y_true, y_pred, alpha=0.5, color='blue', label='Data Points')
+
+    # 정답 라인 (y = x)
+    max_val = max(y_true.max(), y_pred.max())
+    min_val = min(y_true.min(), y_pred.min())
+    plt.plot([min_val, max_val], [min_val, max_val], color='red', linestyle='--', label='Perfect Prediction')
+
+    plt.title('Actual vs Predicted Remaining Time')
+    plt.xlabel('Actual Remaining Time (min)')
+    plt.ylabel('Predicted Remaining Time (min)')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+'''
 # (★) 스케일러(StandardScaler)도 함께 저장하도록 수정
 def create_and_save_model(X, y):
-    """전체 데이터로 모델과 스케일러를 학습하고 파일로 저장합니다."""
+    """모델 학습 및 성능 평가"""
     if X.empty or y.empty:
-        print("학습할 데이터가 없어 모델 생성을 건너킵니다.")
+        print("학습할 데이터가 없어 모델 생성을 건너뜁니다.")
         return None
 
-    print("\n--- 모델 및 스케일러 학습 시작 ---")
+    print("\n--- 모델 성능 평가 및 학습 시작 ---")
 
-    # 1. 스케일러 학습 및 적용
+    # 1. 데이터 분리 (학습용 80%, 평가용 20%)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    # 2. 스케일러 학습 (주의: 학습 데이터로만 fit 해야 함)
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)  # 평가 데이터는 transform만
 
-    # 2. 모델 학습
+    # 3. 모델 학습
     model = xgb.XGBRegressor(
         objective='reg:squarederror',
-        n_estimators=500,  # (성능을 위해 estimators 증가)
+        n_estimators=500,
         learning_rate=0.05,
         max_depth=5,
         random_state=42
     )
-    model.fit(X_scaled, y)
+    model.fit(X_train_scaled, y_train)
 
-    # 3. 모델과 스케일러 저장 (★ 스케일러 저장이 필수!)
-    joblib.dump(model, 'drying_model.pkl')
-    joblib.dump(scaler, 'scaler.pkl')
-    print("모델('drying_model.pkl')과 스케일러('scaler.pkl')를 저장했습니다.")
-    return model
+    # 4. (★) 성능 평가
+    y_pred = model.predict(X_test_scaled)
+
+    mae = mean_absolute_error(y_test, y_pred)
+
+    # [수정] 옵션 대신 직접 계산 (호환성 해결)
+    mse = mean_squared_error(y_test, y_pred)
+    rmse = np.sqrt(mse)
+
+    r2 = r2_score(y_test, y_pred)
+    print(f"\n[모델 평가 결과]")
+    print(f"1. 평균 오차 (MAE): {mae:.2f}분 (평균적으로 {mae:.2f}분 정도 틀림)")
+    print(f"2. RMSE: {rmse:.2f}분")
+    print(f"3. 정확도 (R² Score): {r2:.4f} (1.0에 가까울수록 좋음)")
+    #plot_prediction_results(y_test, y_pred)
+    # -------------------------------------------------------
+    # 5. (선택) 실제 서비스용 모델은 전체 데이터로 다시 재학습해서 저장
+    print("\n[최종 모델 저장]")
+    full_scaler = StandardScaler()
+    X_scaled_full = full_scaler.fit_transform(X)  # 전체 데이터 사용
+
+    final_model = xgb.XGBRegressor(
+        objective='reg:squarederror',
+        n_estimators=500,
+        learning_rate=0.05,
+        max_depth=5,
+        random_state=42
+    )
+    final_model.fit(X_scaled_full, y)
+
+    joblib.dump(final_model, 'drying_model.pkl')
+    joblib.dump(full_scaler, 'scaler.pkl')
+    print("전체 데이터로 재학습된 모델과 스케일러를 저장했습니다.")
+
+    return final_model
 
 
 # (★) "실시간 추세" 피처를 생성하도록 수정된 예측 함수
@@ -227,7 +283,7 @@ if __name__ == '__main__':
     # (★) Realtime Database URL로 변경
     DATABASE_URL = "https://smart-drying-rack-fe271-default-rtdb.firebaseio.com/"
     # (★) 사용자가 지정한 RTDB 경로의 기본 이름으로 변경
-    BASE_DATA_PATH = "drying-rack-reading"
+    BASE_DATA_PATH = "drying-rack"
     DRYING_COMPLETE_THRESHOLD = 1.0  # (★) 시뮬레이션 종료 시점 습도
 
     # (★) --- 새 파라미터 (viz.py와 동일) --- (★)
@@ -253,7 +309,7 @@ if __name__ == '__main__':
             dry_stable_rows=DRY_STABLE_POINTS
         )
 
-       # create_correlation_heatmap(X, y)
+        #create_correlation_heatmap(X, y)
         create_and_save_model(X, y)
     else:
         print("RTDB에서 데이터를 가져오지 못해 학습을 진행할 수 없습니다.")
