@@ -4,3 +4,6 @@ xgboost
 scikit-learn
 joblib
 firebase-admin
+matplotlib
+seaborn
+paho-mqtt
