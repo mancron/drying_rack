@@ -287,7 +287,7 @@ if __name__ == '__main__':
     DRYING_COMPLETE_THRESHOLD = 1.0  # (★) 시뮬레이션 종료 시점 습도
 
     # (★) --- 새 파라미터 (viz.py와 동일) --- (★)
-    SESSION_THRESHOLD_HOURS = 1.0  # 세션 분리 기준 시간 (1시간)
+    SESSION_THRESHOLD_HOURS = 2.0  # 세션 분리 기준 시간 (1시간)
     DRY_THRESHOLD = 1.0  # 학습시 '건조 완료'로 간주할 습도 (1%)
     DRY_STABLE_POINTS = 10  # 위 습도가 연속으로 유지되어야 하는 데이터 개수 (10개)
     # (★) --- --- (★)
@@ -320,7 +320,6 @@ if __name__ == '__main__':
     print("--- 실시간 예측 시뮬레이션 시작 ---")
 
     try:
-        # (★) 모델과 스케일러 모두 로드
         loaded_model = joblib.load('drying_model.pkl')
         loaded_scaler = joblib.load('scaler.pkl')
         print("저장된 모델과 스케일러를 불러왔습니다.")
@@ -329,47 +328,49 @@ if __name__ == '__main__':
         exit()
 
     # 2-2. 시뮬레이션용 데이터 준비
+    real_session_start_time = None  # (★ 수정) 전체 세션 시작 시간을 저장할 변수
+
     if not all_completed_data.empty and all_completed_data.shape[0] > 10:
-        # 세션 ID를 다시 계산 (순차 조회 후 합쳐진 데이터이므로 세션 ID가 필요함)
         time_diff_sim = all_completed_data['timestamp'].diff().dt.total_seconds() / 3600
         all_completed_data['session_id'] = (time_diff_sim > SESSION_THRESHOLD_HOURS).cumsum()
 
         last_session_id = all_completed_data['session_id'].max()
         sim_data_pool = all_completed_data[all_completed_data['session_id'] == last_session_id]
 
-        # (★) 시뮬레이션용 데이터가 충분한지 확인
+        # (★ 수정) 전체 세션의 진짜 시작 시간을 미리 추출
+        if not sim_data_pool.empty:
+            real_session_start_time = sim_data_pool['timestamp'].min()
+
         if sim_data_pool.shape[0] > 10:
             new_session_data = sim_data_pool.tail(10).copy().reset_index(drop=True)
             print(f"시뮬레이션용 데이터 {len(new_session_data)}개 준비 완료 (마지막 세션 {last_session_id}의 끝 10개 데이터)")
+            print(f"(★) 세션 시작 시간: {real_session_start_time}")  # 확인용 출력
         else:
             print("시뮬레이션을 위한 데이터가 부족합니다. (마지막 세션 데이터 10개 미만)")
-            new_session_data = pd.DataFrame()  # 빈 프레임으로 설정
-
+            new_session_data = pd.DataFrame()
     else:
         print("시뮬레이션을 위한 데이터가 부족합니다.")
-        new_session_data = pd.DataFrame()  # 빈 프레임으로 설정
+        new_session_data = pd.DataFrame()
 
     # (★) new_session_data가 비어있지 않을 때만 시뮬레이션 실행
-    if not new_session_data.empty:
+    if not new_session_data.empty and real_session_start_time is not None:
         print(f"\n새로운 건조 시작! (시뮬레이션용 데이터 {len(new_session_data)}개)")
         print("-" * 30)
 
-        # 마지막 값을 저장할 변수 초기화
         final_pred_min = 0
         final_elapsed_min = 0
 
         for i in range(3, len(new_session_data) + 1):
             current_data_slice = new_session_data.head(i)
-
-            # 경과 시간 계산
-            elapsed_minutes = (current_data_slice['timestamp'].max() - current_data_slice[
-                'timestamp'].min()).total_seconds() / 60
-            final_elapsed_min = elapsed_minutes  # (★) ET 저장을 위해 갱신
-
             latest_row = current_data_slice.iloc[-1]
+            latest_timestamp = latest_row['timestamp']
+
+            # (★ 수정) 경과 시간 = 현재 데이터 시간 - 전체 세션의 진짜 시작 시간
+            elapsed_minutes = (latest_timestamp - real_session_start_time).total_seconds() / 60
+            final_elapsed_min = elapsed_minutes
+
             moist_cols = ['moisture_percent_1', 'moisture_percent_2', 'moisture_percent_3', 'moisture_percent_4']
             latest_humidity = latest_row[moist_cols].mean()
-            latest_timestamp = latest_row['timestamp']
 
             # (기존 출력 유지)
             print(
@@ -378,7 +379,7 @@ if __name__ == '__main__':
             # 기능 1: 건조 완료 판단
             if latest_humidity < DRYING_COMPLETE_THRESHOLD:
                 print("==> 건조 완료 기준 도달! 건조를 종료합니다.")
-                final_pred_min = 0  # 완료되었으므로 남은 시간 0
+                final_pred_min = 0
                 break
 
             # 기능 2: 남은 시간 예측
@@ -389,12 +390,11 @@ if __name__ == '__main__':
                 predicted_remaining_time = loaded_model.predict(scaled_features)[0]
                 predicted_remaining_time = max(0, predicted_remaining_time)
 
-                final_pred_min = predicted_remaining_time  # (★) RT 저장을 위해 갱신
+                final_pred_min = predicted_remaining_time
 
-                # (기존 중간 과정 출력 유지 - 필요 없으면 주석 처리 하세요)
                 print(f"==> 예상 남은 시간: {int(predicted_remaining_time)}분")
 
-        # (★) 요청하신 포맷으로 마지막에 한 줄 출력
+        # (★) 요청하신 포맷 출력
         print(f"예측시간:{int(final_pred_min)}(min)  경과시간:{int(final_elapsed_min)}(min)")
 
     else:
