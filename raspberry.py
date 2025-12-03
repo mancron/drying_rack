@@ -3,7 +3,7 @@ import threading
 import json
 import joblib
 import pandas as pd
-import numpy as np  # 수학 연산용 추가
+import numpy as np
 import paho.mqtt.client as mqtt
 from firebase_admin import db
 
@@ -36,7 +36,6 @@ def load_ai_models():
     """저장된 통합 AI 모델 번들(all_sensors_bundle.pkl) 불러오기"""
     global models, scalers, features_list
     try:
-        # 통합 파일 로드
         bundle = joblib.load('all_sensors_bundle.pkl')
 
         models = bundle['models']
@@ -44,7 +43,6 @@ def load_ai_models():
         features_list = bundle['features']
 
         print(f"✅ 모델 번들 로드 완료 (센서 {list(models.keys())} 모델 포함)")
-        print(f"   사용 피처: {features_list}")
 
     except Exception as e:
         print(f"❌ 모델 로드 실패: {e}")
@@ -53,28 +51,21 @@ def load_ai_models():
 
 
 def get_current_session_data():
-    """
-    RTDB에서 전체 데이터를 가져와 '현재 진행 중인 세션'의 데이터만 추출
-    (경과 시간 및 초기 습도 계산을 위해 세션 시작점 파악 필수)
-    """
+    """RTDB에서 전체 데이터를 가져와 '현재 진행 중인 세션'의 데이터만 추출"""
     try:
-        # 전체 데이터 가져오기 (데이터 양이 많으면 limit 등을 고려해야 함)
         df = rtdb_manager.fetch_sequential_paths_as_dataframe(BASE_DATA_PATH)
 
         if df.empty or len(df) < 5:
             print("⚠ 데이터가 부족하여 예측할 수 없습니다 (최소 5개 필요).")
             return None
 
-        # 시간순 정렬 및 컬럼 표준화
         df = df.sort_values(by='timestamp').reset_index(drop=True)
         df['light_lux_avg'] = df['lux1']
         df = df.rename(columns={'temperature': 'ambient_temp', 'humidity': 'ambient_humidity'})
 
-        # 세션 분리 로직 (2시간 이상 공백 시 새로운 세션)
         time_diff = df['timestamp'].diff().dt.total_seconds() / 3600
         df['session_id'] = (time_diff > 2.0).cumsum()
 
-        # 가장 마지막(최신) 세션만 추출
         last_session_id = df['session_id'].max()
         current_session_df = df[df['session_id'] == last_session_id].copy().reset_index(drop=True)
 
@@ -86,39 +77,32 @@ def get_current_session_data():
 
 
 def extract_features_for_sensor(session_df, sensor_num):
-    """특정 센서에 대한 예측 피처 생성 (1행 데이터프레임 반환)"""
+    """특정 센서에 대한 예측 피처 생성"""
     try:
-        # 최소 데이터 확인
         if len(session_df) < 5:
-            return None
+            return None, None, None
 
         sensor_col = f'moisture_percent_{sensor_num}'
 
-        # 최근 5개 데이터 (추세/분산 계산용)
         latest_rows = session_df.tail(5).copy()
         latest = latest_rows.iloc[-1]
         prev1 = latest_rows.iloc[-2]
 
-        # 1. 기본 값
-        curr_hum = latest[sensor_col]
+        # [Fix] Numpy 타입을 순수 Python 타입으로 변환
+        curr_hum = float(latest[sensor_col])
 
-        # 2. 변화량 (Delta)
-        delta_hum = curr_hum - prev1[sensor_col]
-        delta_lux = latest['light_lux_avg'] - prev1['light_lux_avg']
+        delta_hum = curr_hum - float(prev1[sensor_col])
+        delta_lux = float(latest['light_lux_avg']) - float(prev1['light_lux_avg'])
 
-        # 3. 추세 및 분산 (Trend & Variance)
         humidity_values = latest_rows[sensor_col].values
-        trend = np.mean(humidity_values[-3:])  # 최근 3개 평균
-        variance = np.std(humidity_values)  # 최근 5개 표준편차
+        trend = float(np.mean(humidity_values[-3:]))
+        variance = float(np.std(humidity_values))
 
-        # 4. 시간 관련 피처 (Time Elapsed)
-        start_time = session_df['timestamp'].iloc[0]  # 세션 시작 시간
-        time_elapsed = (latest['timestamp'] - start_time).total_seconds() / 60
+        start_time = session_df['timestamp'].iloc[0]
+        time_elapsed = float((latest['timestamp'] - start_time).total_seconds() / 60)
 
-        # 5. 초기 값 (Initial Humidity)
-        initial_hum = session_df[sensor_col].iloc[0]
+        initial_hum = float(session_df[sensor_col].iloc[0])
 
-        # 피처 데이터프레임 생성
         input_data = pd.DataFrame([{
             'ambient_temp': latest['ambient_temp'],
             'ambient_humidity': latest['ambient_humidity'],
@@ -130,7 +114,7 @@ def extract_features_for_sensor(session_df, sensor_num):
             'humidity_variance': variance,
             'time_elapsed': time_elapsed,
             'initial_humidity': initial_hum
-        }])[features_list]  # 학습 때와 동일한 컬럼 순서 강제
+        }])[features_list]
 
         return input_data, curr_hum, delta_hum
 
@@ -147,39 +131,36 @@ def prediction_worker(command_data):
     mqtt_client.publish(MQTT_TOPIC_STATUS, "BUSY")
 
     try:
-        # 1. 현재 세션 데이터 준비
         current_session_df = get_current_session_data()
 
         if current_session_df is not None:
             predictions = {}
-            sensor_results = {}  # MQTT 상세 전송용
+            sensor_results = {}
 
-            # 2. 각 센서별 예측 수행 (1~4번)
             for i in range(1, 5):
                 if i not in models:
                     continue
 
-                # 피처 추출
                 features, curr_hum, delta_hum = extract_features_for_sensor(current_session_df, i)
 
                 if features is not None:
-                    # 스케일링 및 예측
                     scaled_features = scalers[i].transform(features)
                     pred_time = models[i].predict(scaled_features)[0]
-                    pred_time = max(0, pred_time)  # 음수 방지
 
-                    # ----------------------------------------
-                    # 🔧 상식 기반 보정 (Predictor 로직 반영)
-                    # ----------------------------------------
+                    # [Fix] float()로 감싸서 Numpy 타입 제거
+                    pred_time = float(max(0, pred_time))
+
+                    # 상식 기반 보정
                     if curr_hum < 2.0:
                         if delta_hum >= 0:
-                            pred_time = 0  # 이미 마름 & 습도 안 떨어짐 -> 완료
+                            pred_time = 0.0
                         else:
-                            pred_time = min(pred_time, 20)  # 마르는 중이면 최대 20분
+                            pred_time = min(pred_time, 20.0)
                     elif curr_hum < 5.0 and delta_hum >= -0.5:
-                        pred_time = min(pred_time, 60)  # 습도 낮은데 변화 적음 -> 최대 60분
+                        pred_time = min(pred_time, 60.0)
 
                     predictions[i] = round(pred_time, 1)
+
                     sensor_results[f"sensor_{i}"] = {
                         "humidity": round(curr_hum, 1),
                         "predicted_min": round(pred_time, 1)
@@ -187,17 +168,16 @@ def prediction_worker(command_data):
                     print(f"   ✅ 센서 {i}: 습도 {curr_hum:.1f}% -> {pred_time:.1f}분 예측")
 
             if predictions:
-                # 3. 최종 결과 집계 (가장 늦게 마르는 시간 기준)
-                max_predicted_time = max(predictions.values())
+                # [Fix] 최종 결과도 float 변환
+                max_predicted_time = float(max(predictions.values()))
 
-                # 4. 결과 메시지 구성
                 result_msg = {
-                    "predicted_minutes": max_predicted_time,  # 대표값 (최대값)
-                    "details": sensor_results,  # 센서별 상세 정보
+                    "predicted_minutes": max_predicted_time,
+                    "details": sensor_results,
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
                 }
 
-                # 5. 저장 및 전송
+                # 파이어베이스 저장 (이제 에러 안 남)
                 db.reference("/drying-rack/result").set(result_msg)
                 print("✅ 파이어베이스에 결과 저장 완료 (/drying-rack/result)")
 
@@ -247,13 +227,10 @@ def main():
 
     print("--- Raspberry Pi AI Bridge (Multi-Sensor) 시작 ---")
 
-    # 1. 모델 번들 로드
     load_ai_models()
 
-    # 2. Firebase 연결
     rtdb_manager = RealtimeDatabaseManager(FIREBASE_KEY_PATH, DATABASE_URL)
 
-    # 3. MQTT 연결
     mqtt_client = mqtt.Client(client_id="drying_rack_pi")
     try:
         mqtt_client.connect(MQTT_BROKER, MQTT_PORT)
@@ -263,7 +240,6 @@ def main():
         print(f"❌ MQTT 연결 실패: {e}")
         return
 
-    # 4. Firebase 리스너 등록
     try:
         ref = db.reference(COMMAND_PATH)
         ref.listen(on_firebase_command)
