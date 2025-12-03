@@ -307,7 +307,7 @@ if __name__ == '__main__':
     if not df_original.empty:
         df_processed = preprocess_data_for_visualization(
             df_original.copy(),
-            session_threshold_hours=1.0,
+            session_threshold_hours=2.0,
             dry_threshold_percent=1.0,
             dry_stable_rows=10
         )

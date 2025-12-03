@@ -9,7 +9,7 @@ from heatmap_generator import create_correlation_heatmap  # (★) 새 파일에�
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, r2_score, mean_squared_error
 import matplotlib.pyplot as plt
-
+from sklearn.model_selection import GroupShuffleSplit
 """
 Firebase DB에서 원본(Raw) 센서 데이터를 가져와 휴지기를 제거하고 건조 세션별로 분리
 각 세션의 데이터(현재값, 변화량)와 남은 건조 시간(정답)을 계산하여 AI 모델을 학습시키고 파일(.pkl)로 저장
@@ -136,15 +136,16 @@ def preprocess_data_for_training(df_original,
     # 학습에 사용할 수 있는 데이터만 필터링 (NaN 값 등 제외)
     processed_df = processed_df.dropna(subset=features + [target])
 
+
     if processed_df.empty:
         print("전처리 후 남은 데이터가 없습니다.")
         return pd.DataFrame(), pd.Series(), []
-
+    groups = processed_df['session_id']
     X = processed_df[features]
     y = processed_df[target]
 
     print("실시간 추세 기반 데이터 전처리 완료.")
-    return X, y, features
+    return X, y, features , groups
 
 '''
 def plot_prediction_results(y_true, y_pred):
@@ -166,7 +167,7 @@ def plot_prediction_results(y_true, y_pred):
     plt.show()
 '''
 # (★) 스케일러(StandardScaler)도 함께 저장하도록 수정
-def create_and_save_model(X, y):
+def create_and_save_model(X, y,groups):
     """모델 학습 및 성능 평가"""
     if X.empty or y.empty:
         print("학습할 데이터가 없어 모델 생성을 건너뜁니다.")
@@ -174,15 +175,25 @@ def create_and_save_model(X, y):
 
     print("\n--- 모델 성능 평가 및 학습 시작 ---")
 
-    # 1. 데이터 분리 (학습용 80%, 평가용 20%)
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    # 1. 데이터 분리 (랜덤 분할 -> 그룹 분할로 변경)
+    # 세션 ID(groups)를 기준으로 훈련/테스트 셋을 나눔
+    splitter = GroupShuffleSplit(test_size=0.2, n_splits=1, random_state=42)
+    train_idx, test_idx = next(splitter.split(X, y, groups=groups))
 
-    # 2. 스케일러 학습 (주의: 학습 데이터로만 fit 해야 함)
+    X_train = X.iloc[train_idx]
+    y_train = y.iloc[train_idx]
+    X_test = X.iloc[test_idx]
+    y_test = y.iloc[test_idx]
+
+    print(f"학습 데이터 개수: {len(X_train)} (세션 {groups.iloc[train_idx].nunique()}개)")
+    print(f"테스트 데이터 개수: {len(X_test)} (세션 {groups.iloc[test_idx].nunique()}개)")
+
+    # 2. 스케일러 학습
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)  # 평가 데이터는 transform만
+    X_test_scaled = scaler.transform(X_test)
 
-    # 3. 모델 학습
+    # 3. 모델 학습 (기존과 동일)
     model = xgb.XGBRegressor(
         objective='reg:squarederror',
         n_estimators=500,
@@ -191,7 +202,6 @@ def create_and_save_model(X, y):
         random_state=42
     )
     model.fit(X_train_scaled, y_train)
-
     # 4. (★) 성능 평가
     y_pred = model.predict(X_test_scaled)
 
@@ -297,20 +307,19 @@ if __name__ == '__main__':
     # (★) 순차 조회 함수 호출로 변경
     all_completed_data = fetch_all_data_from_rtdb(FIREBASE_KEY_PATH, DATABASE_URL, BASE_DATA_PATH)
 
+    # 메인 실행부 수정
     if not all_completed_data.empty:
-        # (★) fetch_all_data_from_rtdb가 이미 정렬을 처리하므로 중복 코드는 삭제
-        all_completed_data.rename(columns={'ts': 'timestamp'}, inplace=True, errors='ignore')
-
-        # (★) 새 파라미터를 사용해 전처리 함수 호출
-        X, y, trained_features = preprocess_data_for_training(
-            all_completed_data.copy(),  # 원본 유지를 위해 복사본 전달
+        # 1. 전처리 함수 호출 (groups 받아오기)
+        X, y, trained_features, groups = preprocess_data_for_training(
+            all_completed_data.copy(),
             session_threshold_hours=SESSION_THRESHOLD_HOURS,
             dry_threshold_percent=DRY_THRESHOLD,
             dry_stable_rows=DRY_STABLE_POINTS
         )
 
+        # 2. 모델 생성 함수 호출 (groups 넘겨주기)
+        create_and_save_model(X, y, groups)
         #create_correlation_heatmap(X, y)
-        create_and_save_model(X, y)
     else:
         print("RTDB에서 데이터를 가져오지 못해 학습을 진행할 수 없습니다.")
 
