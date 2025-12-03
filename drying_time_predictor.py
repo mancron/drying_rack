@@ -149,8 +149,15 @@ def create_and_save_model(X, y, groups):
 
     # 모델 학습
     model = xgb.XGBRegressor(
-        objective='reg:squarederror', n_estimators=500, learning_rate=0.05,
-        max_depth=5, random_state=42
+        objective='reg:squarederror',
+        n_estimators=415,
+        learning_rate=0.16,
+        max_depth=3,
+        random_state=42,
+        gamma=2.9987,
+        min_child_weight=8.4125,
+        subsample=0.53406,
+        colsample_bytree= 0.602372
     )
     model.fit(X_train_scaled, y_train)
 
