@@ -196,10 +196,14 @@ def create_and_save_model(X, y,groups):
     # 3. 모델 학습 (기존과 동일)
     model = xgb.XGBRegressor(
         objective='reg:squarederror',
-        n_estimators=500,
-        learning_rate=0.05,
-        max_depth=5,
-        random_state=42
+        n_estimators=415,
+        learning_rate=0.16,
+        max_depth=3,
+        random_state=42,
+        gamma=2.9987,
+        min_child_weight=8.4125,
+        subsample=0.53406,
+        colsample_bytree= 0.602372
     )
     model.fit(X_train_scaled, y_train)
     # 4. (★) 성능 평가
@@ -225,10 +229,14 @@ def create_and_save_model(X, y,groups):
 
     final_model = xgb.XGBRegressor(
         objective='reg:squarederror',
-        n_estimators=500,
-        learning_rate=0.05,
-        max_depth=5,
-        random_state=42
+        n_estimators=415,
+        learning_rate=0.16,
+        max_depth=3,
+        random_state=42,
+        gamma=2.9987,
+        min_child_weight=8.4125,
+        subsample=0.53406,
+        colsample_bytree= 0.602372
     )
     final_model.fit(X_scaled_full, y)
 
@@ -286,125 +294,111 @@ def make_features_for_prediction(current_session_df, features_list):
     return features
 
 
-# --- 메인 실행 로직 ---
+# --- 메인 실행 로직 (수정됨: 중간 지점 '타임머신' 예측) ---
 if __name__ == '__main__':
     # --- 0. 설정 ---
     FIREBASE_KEY_PATH = "firebase.json"
-    # (★) Realtime Database URL로 변경
     DATABASE_URL = "https://smart-drying-rack-fe271-default-rtdb.firebaseio.com/"
-    # (★) 사용자가 지정한 RTDB 경로의 기본 이름으로 변경
     BASE_DATA_PATH = "drying-rack"
-    DRYING_COMPLETE_THRESHOLD = 1.0  # (★) 시뮬레이션 종료 시점 습도
+    DRYING_COMPLETE_THRESHOLD = 1.0
 
-    # (★) --- 새 파라미터 (viz.py와 동일) --- (★)
-    SESSION_THRESHOLD_HOURS = 2.0  # 세션 분리 기준 시간 (1시간)
-    DRY_THRESHOLD = 1.0  # 학습시 '건조 완료'로 간주할 습도 (1%)
-    DRY_STABLE_POINTS = 10  # 위 습도가 연속으로 유지되어야 하는 데이터 개수 (10개)
-    # (★) --- --- (★)
+    SESSION_THRESHOLD_HOURS = 2.0
+    DRY_THRESHOLD = 1.0
+    DRY_STABLE_POINTS = 10
 
     # --- 1. 학습 단계 ---
     print("--- RTDB에서 전체 학습 데이터 로드 시작 ---")
-    # (★) 순차 조회 함수 호출로 변경
     all_completed_data = fetch_all_data_from_rtdb(FIREBASE_KEY_PATH, DATABASE_URL, BASE_DATA_PATH)
 
-    # 메인 실행부 수정
     if not all_completed_data.empty:
-        # 1. 전처리 함수 호출 (groups 받아오기)
+        # 전처리 및 모델 학습
         X, y, trained_features, groups = preprocess_data_for_training(
             all_completed_data.copy(),
             session_threshold_hours=SESSION_THRESHOLD_HOURS,
             dry_threshold_percent=DRY_THRESHOLD,
             dry_stable_rows=DRY_STABLE_POINTS
         )
-
-        # 2. 모델 생성 함수 호출 (groups 넘겨주기)
         create_and_save_model(X, y, groups)
-        #create_correlation_heatmap(X, y)
     else:
-        print("RTDB에서 데이터를 가져오지 못해 학습을 진행할 수 없습니다.")
+        print("데이터가 없어 학습을 건너뜁니다.")
+        exit()
 
     print("\n" + "=" * 50 + "\n")
 
-    # --- 2. 실시간 예측 단계 (시뮬레이션) ---
-    print("--- 실시간 예측 시뮬레이션 시작 ---")
+    # --- 2. 시뮬레이션 단계 (중간 시점 테스트) ---
+    print("--- 실시간 예측 시뮬레이션 (과거 중간 시점 테스트) ---")
 
     try:
         loaded_model = joblib.load('drying_model.pkl')
         loaded_scaler = joblib.load('scaler.pkl')
         print("저장된 모델과 스케일러를 불러왔습니다.")
-    except FileNotFoundError:
-        print("저장된 모델 또는 스케일러 파일이 없습니다. 먼저 모델을 학습시켜주세요.")
-        exit()
 
-    # 2-2. 시뮬레이션용 데이터 준비
-    real_session_start_time = None  # (★ 수정) 전체 세션 시작 시간을 저장할 변수
+        if not all_completed_data.empty:
+            # (1) 세션 분리 (마지막 세션 찾기)
+            df_sim = all_completed_data.copy().sort_values(by='timestamp')
+            time_diff = df_sim['timestamp'].diff().dt.total_seconds() / 3600
+            df_sim['session_id'] = (time_diff > SESSION_THRESHOLD_HOURS).cumsum()
 
-    if not all_completed_data.empty and all_completed_data.shape[0] > 10:
-        time_diff_sim = all_completed_data['timestamp'].diff().dt.total_seconds() / 3600
-        all_completed_data['session_id'] = (time_diff_sim > SESSION_THRESHOLD_HOURS).cumsum()
+            last_session_id = df_sim['session_id'].max()
+            last_session_df = df_sim[df_sim['session_id'] == last_session_id].copy().reset_index(drop=True)
 
-        last_session_id = all_completed_data['session_id'].max()
-        sim_data_pool = all_completed_data[all_completed_data['session_id'] == last_session_id]
+            if len(last_session_df) > 10:
+                # ----------------------------------------------------------------
+                # [★ 핵심 수정] 맨 끝(tail)이 아니라, "중간 지점"을 강제로 선택
+                # ----------------------------------------------------------------
+                # 예: 전체 데이터의 50% 지점 (한창 건조 중일 때)
+                test_index = len(last_session_df) // 2
 
-        # (★ 수정) 전체 세션의 진짜 시작 시간을 미리 추출
-        if not sim_data_pool.empty:
-            real_session_start_time = sim_data_pool['timestamp'].min()
+                # 원하신다면 특정 습도 시점(예: 30% 이하가 되는 순간)을 찾을 수도 있습니다:
+                # moist_cols = ['moisture_percent_1', 'moisture_percent_2', 'moisture_percent_3', 'moisture_percent_4']
+                # mean_humidity = last_session_df[moist_cols].mean(axis=1)
+                # test_index = (mean_humidity < 30.0).idxmax() # 습도가 30% 밑으로 떨어진 첫 순간
 
-        if sim_data_pool.shape[0] > 10:
-            new_session_data = sim_data_pool.tail(10).copy().reset_index(drop=True)
-            print(f"시뮬레이션용 데이터 {len(new_session_data)}개 준비 완료 (마지막 세션 {last_session_id}의 끝 10개 데이터)")
-            print(f"(★) 세션 시작 시간: {real_session_start_time}")  # 확인용 출력
+                # 해당 시점까지의 데이터 잘라내기 (최근 3개 데이터 필요)
+                current_data_slice = last_session_df.iloc[test_index - 3: test_index + 1]  # 여유있게 가져옴
+
+                # 예측을 위한 마지막 행 기준 정보
+                latest_row = current_data_slice.iloc[-1]
+                current_timestamp = latest_row['timestamp']
+                start_time = last_session_df['timestamp'].iloc[0]  # 세션 시작 시간
+
+                # (2) 경과 시간 계산
+                elapsed_minutes = (current_timestamp - start_time).total_seconds() / 60
+
+                # 현재 습도 확인
+                moist_cols = ['moisture_percent_1', 'moisture_percent_2', 'moisture_percent_3', 'moisture_percent_4']
+                current_humidity = latest_row[moist_cols].mean()
+
+                print(f"⏱ [타임머신 작동] 현재 시점: 세션 시작 후 {int(elapsed_minutes)}분 경과")
+                print(f"💧 현재 평균 습도: {current_humidity:.1f}% (건조 진행 중)")
+
+                # (3) 예측 수행
+                prediction_features = make_features_for_prediction(current_data_slice, trained_features)
+
+                if prediction_features is not None:
+                    scaled_features = loaded_scaler.transform(prediction_features)
+                    predicted_remaining_time = loaded_model.predict(scaled_features)[0]
+                    predicted_remaining_time = max(0, predicted_remaining_time)
+
+                    # (4) 실제 정답(Actual) 계산 (미래를 미리 확인)
+                    real_end_time = last_session_df['timestamp'].max()
+                    actual_remaining_time = (real_end_time - current_timestamp).total_seconds() / 60
+
+                    print("-" * 30)
+                    print(f"✅ AI 예측 남은 시간: {int(predicted_remaining_time)}분")
+                    print(f"👀 실제 정답 남은 시간: {int(actual_remaining_time)}분")
+                    print(f"🎯 오차: {int(abs(predicted_remaining_time - actual_remaining_time))}분")
+                    print("-" * 30)
+
+                    # 요청하신 포맷 출력
+                    print(f"예측시간:{int(predicted_remaining_time)}(min)  경과시간:{int(elapsed_minutes)}(min)")
+                else:
+                    print("예측을 위한 데이터가 충분하지 않습니다 (피처 생성 실패).")
+
+            else:
+                print("마지막 세션의 데이터가 너무 적어 테스트할 수 없습니다.")
         else:
-            print("시뮬레이션을 위한 데이터가 부족합니다. (마지막 세션 데이터 10개 미만)")
-            new_session_data = pd.DataFrame()
-    else:
-        print("시뮬레이션을 위한 데이터가 부족합니다.")
-        new_session_data = pd.DataFrame()
+            print("데이터가 없습니다.")
 
-    # (★) new_session_data가 비어있지 않을 때만 시뮬레이션 실행
-    if not new_session_data.empty and real_session_start_time is not None:
-        print(f"\n새로운 건조 시작! (시뮬레이션용 데이터 {len(new_session_data)}개)")
-        print("-" * 30)
-
-        final_pred_min = 0
-        final_elapsed_min = 0
-
-        for i in range(3, len(new_session_data) + 1):
-            current_data_slice = new_session_data.head(i)
-            latest_row = current_data_slice.iloc[-1]
-            latest_timestamp = latest_row['timestamp']
-
-            # (★ 수정) 경과 시간 = 현재 데이터 시간 - 전체 세션의 진짜 시작 시간
-            elapsed_minutes = (latest_timestamp - real_session_start_time).total_seconds() / 60
-            final_elapsed_min = elapsed_minutes
-
-            moist_cols = ['moisture_percent_1', 'moisture_percent_2', 'moisture_percent_3', 'moisture_percent_4']
-            latest_humidity = latest_row[moist_cols].mean()
-
-            # (기존 출력 유지)
-            print(
-                f"데이터 {i}개 수집 [{latest_timestamp.strftime('%Y-%m-%d %H:%M:%S')}] (경과 시간: {elapsed_minutes:.1f}분, 현재 습도: {latest_humidity:.1f}%)")
-
-            # 기능 1: 건조 완료 판단
-            if latest_humidity < DRYING_COMPLETE_THRESHOLD:
-                print("==> 건조 완료 기준 도달! 건조를 종료합니다.")
-                final_pred_min = 0
-                break
-
-            # 기능 2: 남은 시간 예측
-            prediction_features = make_features_for_prediction(current_data_slice, trained_features)
-
-            if prediction_features is not None:
-                scaled_features = loaded_scaler.transform(prediction_features)
-                predicted_remaining_time = loaded_model.predict(scaled_features)[0]
-                predicted_remaining_time = max(0, predicted_remaining_time)
-
-                final_pred_min = predicted_remaining_time
-
-                print(f"==> 예상 남은 시간: {int(predicted_remaining_time)}분")
-
-        # (★) 요청하신 포맷 출력
-        print(f"예측시간:{int(final_pred_min)}(min)  경과시간:{int(final_elapsed_min)}(min)")
-
-    else:
-        print("시뮬레이션을 실행하지 않았습니다.")
+    except Exception as e:
+        print(f"시뮬레이션 오류 발생: {e}")
